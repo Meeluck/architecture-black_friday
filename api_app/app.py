@@ -4,34 +4,62 @@ import os
 import time
 from typing import List, Optional
 
+# Асинхронный драйвер MongoDB
 import motor.motor_asyncio
+
+# BSON-тип MongoDB для поля _id
 from bson import ObjectId
+
+# FastAPI: создание API, описание тела запроса, HTTP-ошибки и статусы
 from fastapi import Body, FastAPI, HTTPException, status
+
+# Библиотека для кэширования ответов FastAPI
 from fastapi_cache import FastAPICache
 from fastapi_cache.backends.redis import RedisBackend
 from fastapi_cache.decorator import cache
+
+# Кастомное middleware для логирования
 from logmiddleware import RouterLoggingMiddleware, logging_config
+
+# Pydantic-модели для валидации и сериализации
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from pydantic.functional_validators import BeforeValidator
+
+# Ошибки pymongo
 from pymongo import errors
+
+# Асинхронный Redis-клиент
 from redis import asyncio as aioredis
+
+# Для Annotated-типа
 from typing_extensions import Annotated
 
-# Configure JSON logging
+
+# Настройка логирования
 logging.config.dictConfig(logging_config)
 logger = logging.getLogger(__name__)
 
+
+# Создаём FastAPI-приложение
 app = FastAPI()
+
+# Подключаем middleware, которое будет логировать запросы
 app.add_middleware(
     RouterLoggingMiddleware,
     logger=logger,
 )
 
+
+# Читаем настройки из переменных окружения
 DATABASE_URL = os.environ["MONGODB_URL"]
 DATABASE_NAME = os.environ["MONGODB_DATABASE_NAME"]
+
+# Redis необязателен, поэтому берём через getenv
 REDIS_URL = os.getenv("REDIS_URL", None)
 
 
+# Заглушка вместо кэша.
+# Если Redis не настроен, этот декоратор ничего не делает.
 def nocache(*args, **kwargs):
     def decorator(func):
         return func
@@ -39,65 +67,76 @@ def nocache(*args, **kwargs):
     return decorator
 
 
+# Если Redis есть — используем настоящий кэш.
+# Если Redis нет — подменяем его пустым декоратором.
 if REDIS_URL:
     cache = cache
 else:
     cache = nocache
 
 
+# Создаём MongoDB-клиент и выбираем базу данных
 client = motor.motor_asyncio.AsyncIOMotorClient(DATABASE_URL)
 db = client[DATABASE_NAME]
 
-# Represents an ObjectId field in the database.
-# It will be represented as a `str` on the model so that it can be serialized to JSON.
+
+# Тип для MongoDB ObjectId.
+# В ответах API он будет превращён в строку.
 PyObjectId = Annotated[str, BeforeValidator(str)]
 
 
+# Код, который выполняется при старте приложения
 @app.on_event("startup")
 async def startup():
+    # Если Redis настроен — инициализируем кэш
     if REDIS_URL:
         redis = aioredis.from_url(REDIS_URL, encoding="utf8", decode_responses=True)
         FastAPICache.init(RedisBackend(redis), prefix="api:cache")
 
 
+# Модель одного пользователя
 class UserModel(BaseModel):
-    """
-    Container for a single user record.
-    """
-
+    # id в Python соответствует _id в MongoDB
     id: Optional[PyObjectId] = Field(alias="_id", default=None)
+
+    # Обязательные поля
     age: int = Field(...)
     name: str = Field(...)
 
 
+# Модель ответа со списком пользователей
 class UserCollection(BaseModel):
-    """
-    A container holding a list of `UserModel` instances.
-    """
-
     users: List[UserModel]
 
 
+# Диагностический эндпоинт
 @app.get("/")
 async def root():
+    # Получаем список всех коллекций в базе
     collection_names = await db.list_collection_names()
+
+    # Собираем информацию по количеству документов в каждой коллекции
     collections = {}
     for collection_name in collection_names:
         collection = db.get_collection(collection_name)
         collections[collection_name] = {
             "documents_count": await collection.count_documents({})
         }
+
+    # Пробуем получить статус replica set
     try:
         replica_status = await client.admin.command("replSetGetStatus")
         replica_status = json.dumps(replica_status, indent=2, default=str)
     except errors.OperationFailure:
         replica_status = "No Replicas"
 
+    # Получаем информацию о топологии MongoDB
     topology_description = client.topology_description
     read_preference = client.client_options.read_preference
     topology_type = topology_description.topology_type_name
     replicaset_name = topology_description.replica_set_name
 
+    # Если MongoDB работает в режиме sharding — получаем список шардов
     shards = None
     if topology_type == "Sharded":
         shards_list = await client.admin.command("listShards")
@@ -105,10 +144,12 @@ async def root():
         for shard in shards_list.get("shards", {}):
             shards[shard["_id"]] = shard["host"]
 
+    # Проверяем, включён ли кэш
     cache_enabled = False
     if REDIS_URL:
         cache_enabled = FastAPICache.get_enable()
 
+    # Возвращаем диагностическую информацию
     return {
         "mongo_topology_type": topology_type,
         "mongo_replicaset_name": replicaset_name,
@@ -126,32 +167,44 @@ async def root():
     }
 
 
+# Эндпоинт: посчитать количество документов в коллекции
 @app.get("/{collection_name}/count")
 async def collection_count(collection_name: str):
     collection = db.get_collection(collection_name)
     items_count = await collection.count_documents({})
-    # status = await client.admin.command('replSetGetStatus')
-    # import ipdb; ipdb.set_trace()
-    return {"status": "OK", "mongo_db": DATABASE_NAME, "items_count": items_count}
+
+    return {
+        "status": "OK",
+        "mongo_db": DATABASE_NAME,
+        "items_count": items_count,
+    }
 
 
+# Эндпоинт: получить список пользователей
 @app.get(
     "/{collection_name}/users",
     response_description="List all users",
     response_model=UserCollection,
     response_model_by_alias=False,
 )
-@cache(expire=60 * 1)
+@cache(expire=60 * 1)  # кэш ответа на 60 секунд
 async def list_users(collection_name: str):
     """
-    List all of the user data in the database.
-    The response is unpaginated and limited to 1000 results.
+    Возвращает список пользователей из коллекции.
+    Без пагинации, максимум 1000 записей.
     """
+
+    # Искусственная задержка 1 секунда.
+    # Для async-кода это неудачное решение: лучше использовать await asyncio.sleep(1)
     time.sleep(1)
+
     collection = db.get_collection(collection_name)
+
+    # Читаем максимум 1000 документов и заворачиваем в модель ответа
     return UserCollection(users=await collection.find().to_list(1000))
 
 
+# Эндпоинт: получить одного пользователя по имени
 @app.get(
     "/{collection_name}/users/{name}",
     response_description="Get a single user",
@@ -160,16 +213,20 @@ async def list_users(collection_name: str):
 )
 async def show_user(collection_name: str, name: str):
     """
-    Get the record for a specific user, looked up by `name`.
+    Ищет пользователя по полю name.
     """
 
     collection = db.get_collection(collection_name)
+
+    # Пытаемся найти документ по имени
     if (user := await collection.find_one({"name": name})) is not None:
         return user
 
+    # Если не нашли — возвращаем HTTP 404
     raise HTTPException(status_code=404, detail=f"User {name} not found")
 
 
+# Эндпоинт: создать пользователя
 @app.post(
     "/{collection_name}/users",
     response_description="Add new user",
@@ -179,13 +236,20 @@ async def show_user(collection_name: str, name: str):
 )
 async def create_user(collection_name: str, user: UserModel = Body(...)):
     """
-    Insert a new user record.
-
-    A unique `id` will be created and provided in the response.
+    Создаёт нового пользователя в коллекции.
     """
+
     collection = db.get_collection(collection_name)
+
+    # Вставляем документ в MongoDB.
+    # exclude=["id"] — поле id не передаём, MongoDB сама создаст _id.
+    # by_alias=True — используем имена полей как в БД, то есть _id вместо id.
     new_user = await collection.insert_one(
         user.model_dump(by_alias=True, exclude=["id"])
     )
+
+    # Сразу читаем созданный документ обратно по _id
     created_user = await collection.find_one({"_id": new_user.inserted_id})
+
+    # Возвращаем созданный объект клиенту
     return created_user
