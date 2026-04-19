@@ -51,9 +51,25 @@ EOF
 
 ## Настройка
 
-1. **Запуск**
+### **Запуск**
 
 `docker compose -f mongo-sharding.yml up -d`
+
+### Авто настройка
+
+1. Повышаем привилегии для скрипта
+
+```bash
+chmod +x mongo-init.sh
+```
+
+2. Запускаем скрипт
+
+```bash
+./mongo-init.sh 
+```
+
+### Ручная настройка
 
 2. **Инициализация config server**
 
