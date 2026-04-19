@@ -108,6 +108,63 @@ class UserModel(BaseModel):
 class UserCollection(BaseModel):
     users: List[UserModel]
 
+async def get_collection_stats(collection_name: str) -> dict:
+    """
+    Возвращает статистику по коллекции:
+    - общее количество документов
+    - количество документов по каждому шарду, если коллекция шардирована
+
+    Для шардированной коллекции pipeline с $collStats возвращает
+    по одной записи на shard. В каждой записи есть:
+    - shard: имя шарда
+    - count: количество документов на шарде
+    """
+    collection = db.get_collection(collection_name)
+
+    # Точный общий count по коллекции
+    total_documents = await collection.count_documents({})
+
+    documents_by_shard = None
+
+    try:
+        shard_stats_cursor = collection.aggregate(
+            [
+                {
+                    "$collStats": {
+                        "count": {}
+                    }
+                }
+            ]
+        )
+        shard_stats = await shard_stats_cursor.to_list(length=None)
+
+        # Если коллекция шардирована, Mongo обычно вернёт несколько документов,
+        # по одному на каждый shard, и в них будет поле "shard".
+        per_shard = {}
+        for item in shard_stats:
+            shard_name = item.get("shard")
+            shard_count = item.get("count")
+
+            # Для нешардированной коллекции поля shard может не быть
+            if shard_name is not None and shard_count is not None:
+                per_shard[shard_name] = shard_count
+
+        if per_shard:
+            documents_by_shard = per_shard
+
+    except Exception as ex:
+        # Не валим весь endpoint, если статистику по шардам получить не удалось.
+        logger.warning(
+            "Failed to get shard stats for collection '%s': %s",
+            collection_name,
+            ex,
+        )
+
+    return {
+        "documents_count": total_documents,
+        "documents_by_shard": documents_by_shard,
+    }
+
 
 # Диагностический эндпоинт
 @app.get("/")
@@ -118,10 +175,7 @@ async def root():
     # Собираем информацию по количеству документов в каждой коллекции
     collections = {}
     for collection_name in collection_names:
-        collection = db.get_collection(collection_name)
-        collections[collection_name] = {
-            "documents_count": await collection.count_documents({})
-        }
+        collections[collection_name] = await get_collection_stats(collection_name)
 
     # Пробуем получить статус replica set
     try:
@@ -143,6 +197,7 @@ async def root():
         shards = {}
         for shard in shards_list.get("shards", {}):
             shards[shard["_id"]] = shard["host"]
+
 
     # Проверяем, включён ли кэш
     cache_enabled = False

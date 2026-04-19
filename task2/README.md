@@ -33,7 +33,7 @@ shard1
 :
 
 ```shell
-docker compose exec -T shadr1 mongosh --port 27018 --quiet <<EOF
+docker compose exec -T mongo-shard1-rs1 mongosh --port 27018  <<EOF
 use somedb
 db.helloDoc.countDocuments()
 EOF  
