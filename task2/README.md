@@ -53,7 +53,7 @@ EOF
 
 ### **Запуск**
 
-`docker compose -f mongo-sharding.yml up -d`
+`docker compose up -d`
 
 ### Авто настройка
 

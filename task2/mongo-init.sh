@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-COMPOSE_FILE="mongo-sharding.yml"
+COMPOSE_FILE="compose.yml"
 
 CONFIG_SERVICE="configsvr"
 CONFIG_PORT="27019"
