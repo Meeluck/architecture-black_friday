@@ -34,8 +34,20 @@ debug_docker_ps() {
   docker ps
 }
 
-debug_docker_ps
+print_replica_count() {
+  local service_name="$1"
+  local port="$2"
 
+  docker compose -f "${COMPOSE_FILE}" exec -T "${service_name}" \
+    mongosh --port "${port}" --quiet <<EOF_JS
+rs.secondaryOk();
+db = db.getSiblingDB("${DB_NAME}");
+const count = db.${COLLECTION_NAME}.countDocuments();
+print("${service_name}: " + count);
+EOF_JS
+}
+
+debug_docker_ps
 
 log "Инициализация config server replica set"
 docker compose -f "${COMPOSE_FILE}" exec -T "${CONFIG_SERVICE}" \
@@ -151,18 +163,28 @@ use ${DB_NAME}
 db.${COLLECTION_NAME}.countDocuments()
 EOF
 
-log "Проверка количества документов на shard1"
+log "Проверка количества документов на shard1 primary"
 docker compose -f "${COMPOSE_FILE}" exec -T "${SHARD1_SERVICE}" \
   mongosh --port "${SHARD1_PORT}" --quiet <<EOF
 use ${DB_NAME}
 db.${COLLECTION_NAME}.countDocuments()
 EOF
 
-log "Проверка количества документов на shard2"
+log "Проверка количества документов на shard2 primary"
 docker compose -f "${COMPOSE_FILE}" exec -T "${SHARD2_SERVICE}" \
   mongosh --port "${SHARD2_PORT}" --quiet <<EOF
 use ${DB_NAME}
 db.${COLLECTION_NAME}.countDocuments()
 EOF
+
+log "Проверка количества документов на всех репликах shard1"
+print_replica_count "shard1-rs1" "27018"
+print_replica_count "shard1-rs2" "27018"
+print_replica_count "shard1-rs3" "27018"
+
+log "Проверка количества документов на всех репликах shard2"
+print_replica_count "shard2-rs1" "27018"
+print_replica_count "shard2-rs2" "27018"
+print_replica_count "shard2-rs3" "27018"
 
 log "Готово"

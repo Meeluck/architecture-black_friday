@@ -23,6 +23,20 @@
 
 `docker compose up -d`
 
+### Авто настройка
+
+1. Повышаем привилегии для скрипта
+
+```bash
+chmod +x mongo-init_task3.sh
+```
+
+2. Запускаем скрипт
+
+```bash
+./mongo-init_task3.sh 
+```
+
 ### Ручная настройка
 
 2. **Инициализация config server**

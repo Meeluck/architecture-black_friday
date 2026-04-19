@@ -166,38 +166,148 @@ async def get_collection_stats(collection_name: str) -> dict:
     }
 
 
+# Получить информацию по шардам и репликам
+async def get_shards_info() -> dict:
+    """
+    Возвращает информацию по каждому шарду:
+    - host: строка из listShards
+    - replica_set_name: имя replica set
+    - replica_count: количество членов replica set
+    - replica_members: список узлов replica set
+    """
+    shards_info = {}
+
+    shards_list = await client.admin.command({"listShards": 1})
+
+    for shard in shards_list.get("shards", []):
+        shard_id = shard["_id"]
+        shard_host = shard["host"]  # например: rs0/shard1a:27018,shard1b:27018,shard1c:27018
+
+        replica_set_name = None
+        replica_members = []
+
+        if "/" in shard_host:
+            replica_set_name, members_part = shard_host.split("/", 1)
+            replica_members = [member.strip() for member in members_part.split(",") if member.strip()]
+        else:
+            # Теоретически shard может быть не replica set, а одиночным узлом
+            replica_members = [shard_host]
+
+        shards_info[shard_id] = {
+            "host": shard_host,
+            "replica_set_name": replica_set_name,
+            "replica_count": len(replica_members),
+            "replica_members": replica_members,
+        }
+
+    return shards_info
+
+
+# Получить распределение документов по шардам для всех шардированных коллекций в текущей БД
+async def get_sharded_distribution() -> dict:
+    """
+    Возвращает словарь вида:
+    {
+        "users": {
+            "shard01": 520,
+            "shard02": 480
+        }
+    }
+
+    Использует $shardedDataDistribution, который работает через mongos.
+    """
+    distribution = {}
+
+    try:
+        result = await db.command(
+            {
+                "aggregate": 1,
+                "pipeline": [
+                    {"$shardedDataDistribution": {}}
+                ],
+                "cursor": {},
+            }
+        )
+
+        first_batch = result.get("cursor", {}).get("firstBatch", [])
+
+        for item in first_batch:
+            ns = item.get("ns")  # например: mydb.users
+            if not ns or not ns.startswith(f"{DATABASE_NAME}."):
+                continue
+
+            collection_name = ns.split(".", 1)[1]
+
+            per_shard = {}
+            for shard_info in item.get("shards", []):
+                shard_name = shard_info.get("shardName")
+                shard_documents = shard_info.get("numOwnedDocuments", 0)
+
+                if shard_name is not None:
+                    per_shard[shard_name] = shard_documents
+
+            distribution[collection_name] = per_shard
+
+    except Exception as ex:
+        logger.warning("Failed to get sharded distribution: %s", ex)
+
+    return distribution
+
 # Диагностический эндпоинт
 @app.get("/")
 async def root():
-    # Получаем список всех коллекций в базе
+    # Список коллекций в текущей БД
     collection_names = await db.list_collection_names()
 
-    # Собираем информацию по количеству документов в каждой коллекции
-    collections = {}
-    for collection_name in collection_names:
-        collections[collection_name] = await get_collection_stats(collection_name)
-
-    # Пробуем получить статус replica set
-    try:
-        replica_status = await client.admin.command("replSetGetStatus")
-        replica_status = json.dumps(replica_status, indent=2, default=str)
-    except errors.OperationFailure:
-        replica_status = "No Replicas"
-
-    # Получаем информацию о топологии MongoDB
+    # Топология MongoDB
     topology_description = client.topology_description
     read_preference = client.client_options.read_preference
     topology_type = topology_description.topology_type_name
     replicaset_name = topology_description.replica_set_name
 
-    # Если MongoDB работает в режиме sharding — получаем список шардов
+    # Информация по шардам и репликам
     shards = None
     if topology_type == "Sharded":
-        shards_list = await client.admin.command("listShards")
-        shards = {}
-        for shard in shards_list.get("shards", {}):
-            shards[shard["_id"]] = shard["host"]
+        shards = await get_shards_info()
 
+    # Распределение документов по шардам для шардированных коллекций
+    sharded_distribution = {}
+    if topology_type == "Sharded":
+        sharded_distribution = await get_sharded_distribution()
+
+    # Сбор статистики по коллекциям и общий счётчик по базе
+    collections = {}
+    database_documents_count = 0
+    database_documents_by_shard = {}
+
+    for collection_name in collection_names:
+        collection = db.get_collection(collection_name)
+
+        # Точный count по коллекции
+        documents_count = await collection.count_documents({})
+        database_documents_count += documents_count
+
+        # Распределение по шардам для конкретной коллекции
+        documents_by_shard = sharded_distribution.get(collection_name)
+
+        collections[collection_name] = {
+            "documents_count": documents_count,
+            "documents_by_shard": documents_by_shard,
+        }
+
+        # Агрегируем общее количество документов по каждому шарду по всей БД
+        if documents_by_shard:
+            for shard_name, shard_documents in documents_by_shard.items():
+                database_documents_by_shard[shard_name] = (
+                    database_documents_by_shard.get(shard_name, 0) + shard_documents
+                )
+
+    # Статус репликации для текущего подключения
+    try:
+        replica_status = await client.admin.command("replSetGetStatus")
+        replica_status = json.dumps(replica_status, indent=2, default=str)
+    except errors.OperationFailure:
+        replica_status = "No Replicas"
 
     # Проверяем, включён ли кэш
     cache_enabled = False
@@ -215,8 +325,13 @@ async def root():
         "mongo_secondary_hosts": client.secondaries,
         "mongo_is_primary": client.is_primary,
         "mongo_is_mongos": client.is_mongos,
+
+        "database_documents_count": database_documents_count,
+        "database_documents_by_shard": database_documents_by_shard,
+
         "collections": collections,
         "shards": shards,
+
         "cache_enabled": cache_enabled,
         "status": "OK",
     }
