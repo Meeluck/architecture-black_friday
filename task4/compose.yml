@@ -1,0 +1,240 @@
+version: '3'
+
+name: sharding-repl-cache
+
+services:
+  
+  configsvr:
+    image: mongo:latest
+    container_name: mongo-configsvr
+    command:
+      [
+        "mongod",
+        "--configsvr",
+        "--replSet",
+        "configReplSet",
+        "--bind_ip_all",
+        "--port",
+        "27019"
+      ]
+    ports:
+      - "27019:27019"
+    volumes:
+      - configsvr-data:/data/db
+    networks:
+      - mongo-cluster
+    healthcheck:
+      test: [ "CMD", "mongo", "--eval", "db.adminCommand('ping')" ]
+      interval: 5s
+      start_period: 10s
+    
+  mongos_router:
+    image: mongo:latest
+    container_name: mongo-mongos
+    depends_on:
+      - configsvr
+    command:
+      [
+        "mongos",
+        "--configdb",
+        "configReplSet/configsvr:27019",
+        "--bind_ip_all",
+        "--port",
+        "27017"
+      ]
+    ports:
+      - "27017:27017"
+    networks:
+      - mongo-cluster
+      - app
+    healthcheck:
+      test: [ "CMD", "mongo", "--eval", "db.adminCommand('ping')" ]
+      interval: 5s
+      start_period: 10s
+
+  shard1-rs1:
+    image: mongo:latest
+    container_name: mongo-shard1-rs1
+    command:
+      [
+        "mongod",
+        "--shardsvr",
+        "--replSet",
+        "shard1ReplSet",
+        "--bind_ip_all",
+        "--port",
+        "27018"
+      ]
+    ports:
+      - "27118:27018"
+    volumes:
+      - shard1-rs1-data:/data/db
+    networks:
+      - mongo-cluster
+    healthcheck:
+      test: [ "CMD", "mongo", "--eval", "db.adminCommand('ping')" ]
+      interval: 5s
+      start_period: 10s
+  shard1-rs2:
+    image: mongo:latest
+    container_name: mongo-shard1-rs2
+    command:
+      [
+        "mongod",
+        "--shardsvr",
+        "--replSet",
+        "shard1ReplSet",
+        "--bind_ip_all",
+        "--port",
+        "27018"
+      ]
+    ports:
+      - "27119:27018"
+    volumes:
+      - shard1-rs2-data:/data/db
+    networks:
+      - mongo-cluster
+    healthcheck:
+      test: [ "CMD", "mongo", "--eval", "db.adminCommand('ping')" ]
+      interval: 5s
+      start_period: 10s
+  shard1-rs3:
+    image: mongo:latest
+    container_name: mongo-shard1-rs3
+    command:
+      [
+        "mongod",
+        "--shardsvr",
+        "--replSet",
+        "shard1ReplSet",
+        "--bind_ip_all",
+        "--port",
+        "27018"
+      ]
+    ports:
+      - "27120:27018"
+    volumes:
+      - shard1-rs3-data:/data/db
+    networks:
+      - mongo-cluster
+    healthcheck:
+      test: [ "CMD", "mongo", "--eval", "db.adminCommand('ping')" ]
+      interval: 5s
+      start_period: 10s
+  
+
+  shard2-rs1:
+    image: mongo:latest
+    container_name: mongo-shard2-rs1
+    command:
+      [
+        "mongod",
+        "--shardsvr",
+        "--replSet",
+        "shard2ReplSet",
+        "--bind_ip_all",
+        "--port",
+        "27018"
+      ]
+    ports:
+      - "27218:27018"
+    volumes:
+      - shard2-rs1-data:/data/db
+    networks:
+      - mongo-cluster
+    healthcheck:
+      test: [ "CMD", "mongo", "--eval", "db.adminCommand('ping')" ]
+      interval: 5s
+      start_period: 10s
+  shard2-rs2:
+    image: mongo:latest
+    container_name: mongo-shard2-rs2
+    command:
+      [
+        "mongod",
+        "--shardsvr",
+        "--replSet",
+        "shard2ReplSet",
+        "--bind_ip_all",
+        "--port",
+        "27018"
+      ]
+    ports:
+      - "27219:27018"
+    volumes:
+      - shard2-rs2-data:/data/db
+    networks:
+      - mongo-cluster
+    healthcheck:
+      test: [ "CMD", "mongo", "--eval", "db.adminCommand('ping')" ]
+      interval: 5s
+      start_period: 10s
+  shard2-rs3:
+    image: mongo:latest
+    container_name: mongo-shard2-rs3
+    command:
+      [
+        "mongod",
+        "--shardsvr",
+        "--replSet",
+        "shard2ReplSet",
+        "--bind_ip_all",
+        "--port",
+        "27018"
+      ]
+    ports:
+      - "27220:27018"
+    volumes:
+      - shard2-rs3-data:/data/db
+    networks:
+      - mongo-cluster
+    healthcheck:
+      test: [ "CMD", "mongo", "--eval", "db.adminCommand('ping')" ]
+      interval: 5s
+      start_period: 10s
+
+  redis:
+    image: redis:latest
+    container_name: redis-server
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    networks:
+      - app
+  pymongo_api:
+    container_name: pymongo_api
+    build: 
+      context: ../api_app
+      dockerfile: Dockerfile
+    depends_on:
+      - mongos_router
+    ports:
+      - 8080:8080
+    
+    environment:
+      MONGODB_URL: "mongodb://mongos_router:27017"
+      MONGODB_DATABASE_NAME: "somedb"
+      REDIS_URL: "redis://redis:6379"
+    networks:
+      - app
+
+volumes:
+  configsvr-data:
+  shard1-rs1-data:
+  shard1-rs2-data:
+  shard1-rs3-data:
+  shard2-rs1-data:
+  shard2-rs2-data:
+  shard2-rs3-data:
+  redis_data:
+
+
+networks:
+  mongo-cluster:
+    driver: bridge
+  app:
+    driver: bridge
+  
