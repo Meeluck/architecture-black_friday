@@ -203,40 +203,34 @@ async def get_shards_info() -> dict:
     return shards_info
 
 
-# Получить распределение документов по шардам для всех шардированных коллекций в текущей БД
 async def get_sharded_distribution() -> dict:
     """
-    Возвращает словарь вида:
-    {
-        "users": {
-            "shard01": 520,
-            "shard02": 480
-        }
-    }
-
-    Использует $shardedDataDistribution, который работает через mongos.
+    Возвращает распределение документов по шардам
+    для шардированных коллекций текущей БД.
     """
     distribution = {}
 
     try:
-        result = await db.command(
-            {
-                "aggregate": 1,
-                "pipeline": [
-                    {"$shardedDataDistribution": {}}
-                ],
-                "cursor": {},
-            }
+        admin_db = client["admin"]
+
+        # $shardedDataDistribution должен запускаться на admin DB через mongos
+        cursor = admin_db.aggregate(
+            [
+                {"$shardedDataDistribution": {}},
+                {"$match": {"ns": {"$regex": f"^{DATABASE_NAME}\\."}}},
+            ]
         )
 
-        first_batch = result.get("cursor", {}).get("firstBatch", [])
+        items = await cursor.to_list(length=None)
 
-        for item in first_batch:
-            ns = item.get("ns")  # например: mydb.users
-            if not ns or not ns.startswith(f"{DATABASE_NAME}."):
+        for item in items:
+            ns = item.get("ns")  # например "somedb.helloDoc"
+            if not ns or "." not in ns:
                 continue
 
-            collection_name = ns.split(".", 1)[1]
+            db_name, collection_name = ns.split(".", 1)
+            if db_name != DATABASE_NAME:
+                continue
 
             per_shard = {}
             for shard_info in item.get("shards", []):
@@ -246,10 +240,11 @@ async def get_sharded_distribution() -> dict:
                 if shard_name is not None:
                     per_shard[shard_name] = shard_documents
 
-            distribution[collection_name] = per_shard
+            if per_shard:
+                distribution[collection_name] = per_shard
 
     except Exception as ex:
-        logger.warning("Failed to get sharded distribution: %s", ex)
+        logger.exception("Failed to get sharded distribution")
 
     return distribution
 
